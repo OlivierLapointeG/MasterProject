@@ -3,11 +3,12 @@ import numpy as np
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.nn import Linear, Sequential, BatchNorm1d, ReLU, Dropout
-from torch_geometric.nn import MessagePassing,global_mean_pool, global_add_pool, global_max_pool, GINConv, GCNConv, GATConv, ResGatedGraphConv, SGConv
+from torch_geometric.nn import MessagePassing,global_mean_pool, global_add_pool, global_max_pool, GINConv, GCNConv, GATConv, ResGatedGraphConv, SGConv, PNAConv
 from torch_geometric.utils import add_self_loops, degree
 from utils import customSigmoid, dirichlet_energy
 from GINlayer import CustomGINLayer
 from GCNlayer import CustomGCNLayer
+from TOGNNdev import TOGNNLayer, EdgeControl
 import time
 
 
@@ -75,18 +76,22 @@ def extract_control_nodes_features(node_numbers, batch, x):
 
 def fast_extract_control_nodes_features(node_numbers, batch, x):
     # Determine the total number of graphs in the batch
-    batch_size = batch.max().item() + 1
-    num_nodes_per_graph = torch.bincount(batch, minlength=batch_size)
-    num_nodes_before = torch.cumsum(num_nodes_per_graph, 0) - num_nodes_per_graph
-    idx = num_nodes_before + node_numbers
-    return x[idx]
+    if batch is None:
+        #extract control node features
+        return x[node_numbers]
+    else:
+        batch_size = batch.max().item() + 1
+        num_nodes_per_graph = torch.bincount(batch, minlength=batch_size)
+        num_nodes_before = torch.cumsum(num_nodes_per_graph, 0) - num_nodes_per_graph
+        idx = num_nodes_before + node_numbers
+        return x[idx]
 
 class GNN(torch.nn.Module):
     "The model"
     def __init__(self, dim_in, dim_h, depth, layersType = 'GIN', residual=True,
                   prelinear=1, init_drop =0.05,final_drop=0.25,readout = "add",
                    task='regression',num_classes=10, weighted=False, double_mlp = False,
-                   self_loop=True, mlp_depth=2):
+                   self_loop=True, mlp_depth=2, deg=None, dim_mlp=128):
         super(GNN, self).__init__()
         # Create a list to store the GIN layers
         self.gnnLayers = nn.ModuleList()
@@ -102,6 +107,7 @@ class GNN(torch.nn.Module):
         self.residual = residual
         self.double_mlp = double_mlp
         self.self_loop = self_loop
+        self.deg = deg
         if weighted == "NW":
             weighted = False
         else:
@@ -142,9 +148,12 @@ class GNN(torch.nn.Module):
             if layersType == 'torchSGCN':
                 gin_layer = SGConv(self.dim_in if _ == 0 else dim_h, dim_h)
                 self.gnnLayers.append(gin_layer)
+            if layersType == "torchPNA":
+                gin_layer = PNAConv(self.dim_in if _ == 0 else dim_h, dim_h, aggregators=['sum'], scalers=['identity'], deg=self.deg)
+                self.gnnLayers.append(gin_layer)
 
-            # if layersType == "ScalarAlphaGIN":
-            #     gin_layer = ScalarAlphaGINLayer(dim_in if _ == 0 else dim_h, dim_h, weighted=weighted)
+            # if layersType == "TOGNN":
+            #     gin_layer = TOGNN(dim_in if _ == 0 else dim_h, dim_h, weighted=weighted)
             #     self.gnnLayers.append(gin_layer)
 
             # if layersType == "VectorAlphaGIN":
@@ -164,8 +173,8 @@ class GNN(torch.nn.Module):
         #     self.readout = global_max_pool
 
         
-        self.lin1 = Linear(dim_h, dim_h)
-        self.lin2 = Linear(dim_h, dim_h)
+        self.lin1 = Linear(dim_h, dim_mlp)
+        self.lin2 = Linear(dim_mlp, dim_mlp)
         if layersType == "torchSGCN":
             self.lin1 = Sequential(Linear(dim_h, 2*dim_h), BatchNorm1d(2*dim_h), ReLU(), Linear(2*dim_h, 2*dim_h), BatchNorm1d(2*dim_h), ReLU(),
                                    Linear(2*dim_h, dim_h), BatchNorm1d(dim_h), ReLU())
@@ -173,11 +182,11 @@ class GNN(torch.nn.Module):
         if task == "classification":
             self.lin3 = Linear(dim_h, self.num_classes)
         else:
-            self.lin3a = Linear(dim_h, dim_h)
-            self.lin4a = Linear(dim_h, 1)
-            self.lin3b = Linear(dim_h, dim_h)
-            self.lin4b = Linear(dim_h, 1)
-        self.BN = BatchNorm1d(dim_h)
+            self.lin3a = Linear(dim_mlp, dim_mlp)
+            self.lin4a = Linear(dim_mlp, 1)
+            self.lin3b = Linear(dim_mlp, dim_mlp)
+            self.lin4b = Linear(dim_mlp, 1)
+        self.BN = BatchNorm1d(dim_mlp)
     
 
     def forward(self, x, edge_index, edge_weights=None, degrees=None ,batch=1, dirichlet = False, dropout=True, ctrl=False):
@@ -217,26 +226,31 @@ class GNN(torch.nn.Module):
         h = fast_extract_control_nodes_features(ctrl, batch, x)
         
         out = self.lin1(h)
-        out = self.BN(out)
+        if batch is not None:
+            out = self.BN(out)
         out = nn.functional.relu(out)
         out = self.lin2(out)
-        out = self.BN(out)
+        if batch is not None:
+            out = self.BN(out)
         out = nn.functional.relu(out)
         if dropout:
             out = F.dropout(out, p=self.final_drop, training=self.training)
         if self.double_mlp == False:
             # Classifier
             out = self.lin3a(out)
-            out = self.BN(out)
+            if batch is not None:
+                out = self.BN(out)
             out = nn.functional.relu(out)
             out = self.lin4a(out)
         else: 
             out1 = self.lin3a(out)
-            out1 = self.BN(out1)
+            if batch is not None:
+                out1 = self.BN(out1)
             out1 = nn.functional.relu(out1)
             out1 = self.lin4a(out1)
             out2 = self.lin3b(out)
-            out2 = self.BN(out2)
+            if batch is not None:
+                out2 = self.BN(out2)
             out2 = nn.functional.relu(out2)
             out2 = self.lin4b(out2)
             return out1, out2, dirichlet_energy(x, edge_index).item()
