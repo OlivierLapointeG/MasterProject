@@ -23,16 +23,28 @@ print(device)
 test = str(sys.argv[1])
 dist = int(sys.argv[2])
 name = str(sys.argv[3])
-VISUALIZE = False
-HISTOGRAM = False
+if name == "ZINC_mul":
+    test = "vec_mul"
+mode = str(sys.argv[4]) #visualise, save or histogram 
+if mode == "visualise":
+    VISUALIZE = True
+    HISTOGRAM = False
+elif mode == "save":
+    VISUALIZE = False
+    HISTOGRAM = False
+elif mode == "histogram":
+    VISUALIZE = False
+    HISTOGRAM = True
 if name == "QM9":
-    dataset = QM9(root='/home/olivier/GraphCurvatureProject/QM9dataset')
+    dataset = QM9(root='/home/students/oliver/MasterProject/QM9dataset')
 elif name == "LRGB":
-    dataset = LRGBDataset(name="Peptides-func",root='/home/olivier/GraphCurvatureProject/LRGBdataset')
+    dataset = LRGBDataset(name="Peptides-func",root='/home/students/oliver/MasterProject/LRGBdataset')
 elif name == "ZINC":
-    dataset = ZINC(subset=True,root='/home/olivier/GraphCurvatureProject/ZINCdataset')
+    dataset = ZINC(subset=True,root='/home/students/oliver/MasterProject/ZINCdataset')
 elif name =='ZINC_SRDF':
-    dataset = ZINC(subset=True,root='/home/olivier/GraphCurvatureProject/ZINCdataset')
+    dataset = ZINC(subset=True,root='/home/students/oliver/MasterProjectZINCdataset')
+elif name == "ZINC_mul":
+    dataset = ZINC(subset=True,root='/home/students/oliver/MasterProject/ZINCdataset')
 
 
 
@@ -102,7 +114,9 @@ def changeFeatures(data, dist=10, test="both"):
     elif test=="squash":
         data.y = torch.pow(torch.tensor([data.x[pairs[0][0],1] + data.x[pairs[0][1],1]]), 2)
     elif test=="vec":
-        data.y = [data.x[pairs[0][0],1] * data.x[pairs[0][1],1], energy]
+        data.y = [torch.pow(torch.tensor([data.x[pairs[0][0],1] + data.x[pairs[0][1],1]]), 2), energy]
+    elif test=="vec_mul":
+        data.y = [torch.tensor([data.x[pairs[0][0],1] * data.x[pairs[0][1],1]]), energy]
     return data.x, data.y, pairs[0][0]
 
 
@@ -118,13 +132,15 @@ for i in tqdm(range(len(dataset))):
 # for i in tqdm(range(len(dataset)//1000)):
     data = dataset[i]
     nb_loops = data.edge_index.shape[1] // 20
-    new_edge_index = sdrf(data, loops=nb_loops, remove_edges=True, removal_bound=1.7, tau=20, is_undirected=True).edge_index
+    if name == 'ZINC_SRDF':
+        new_edge_index = sdrf(data, loops=nb_loops, remove_edges=True, removal_bound=1.7, tau=20, is_undirected=True).edge_index
     x,y, nb = changeFeatures(data, dist, test=test)
     if x is not False:
         new_dataset_features_list.append(x)
         new_dataset_target_list.append(y)
         new_dataset_control_nb.append(nb)
-        new_dataset_edge_index.append(new_edge_index)
+        if name == 'ZINC_SRDF':
+            new_dataset_edge_index.append(new_edge_index)
     else:
         skip_list.append(i)
 
@@ -163,7 +179,7 @@ if VISUALIZE:
     adj = edge_index_to_adjacency_matrix(edge_index).numpy()
     graph = nx.from_numpy_array(adj)
     pos = nx.spring_layout(graph)
-    #create the colors for the nodes, with a random one being red
+    #create the colors for the nodes
     colors = []
     for i in range(len(graph.nodes())):
         #if feature 0 i 0, then node black

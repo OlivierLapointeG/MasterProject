@@ -6,6 +6,10 @@ from torch_geometric.transforms import BaseTransform
 import cvxpy as cp
 from tqdm import tqdm
 import pickle
+import numpy as np
+from torch_geometric.loader import DataLoader
+import time
+import random
 
 def edge_index_to_adjacency_matrix(edge_index, testing=False):
     if edge_index.numel() == 0:
@@ -590,3 +594,135 @@ def apply_weights_on_dataset(weightpath, disconnectedpath, dataset):
         new_dataset.append(data)
     dataset = new_dataset
     return dataset
+
+def ConstructAdjFromControl(edge_index, edge_control):
+    """
+    Returns the adjacency matrix from the edge index and the edge control
+    """
+    # Convert edge_index to numpy array
+    edge_index_np = edge_index.cpu()
+    edge_index_np = edge_index_np.numpy()
+
+    # Get the maximum node index
+    max_node_index = np.max(edge_index_np) + 1
+
+    # Initialize the adjacency matrix
+    adj = np.zeros((max_node_index, max_node_index))
+
+    # Iterate over the edges
+    for i in range(len(edge_index_np[0])):
+        adj[edge_index_np[0][i], edge_index_np[1][i]] = edge_control[i]
+
+    return adj
+
+def compute_diff(wModel, original_loader, epsilon_loader, device, batch_size):
+            diff_smooth = 0
+            diff_squash = 0
+
+            for data, data2 in zip(original_loader, epsilon_loader):
+                data = data.to(device)
+                data2 = data2.to(device)
+                out_smooth, out_squash, _ = wModel(data.x.to(torch.float32), data.edge_index, batch=data.batch, dirichlet=False, ctrl=data.ctrl)
+                out_smooth, out_squash = out_smooth.view(-1), out_squash.view(-1)
+                out_smooth2, out_squash2, _ = wModel(data2.x.to(torch.float32), data2.edge_index, batch=data2.batch, dirichlet=False, ctrl=data2.ctrl)
+                out_smooth2, out_squash2 = out_smooth2.view(-1), out_squash2.view(-1)
+
+                # compute the difference between the outputs
+                diff_smooth += torch.sum(torch.abs(out_smooth - out_smooth2)) / (len(epsilon_loader)*batch_size)
+                diff_squash += torch.sum(torch.abs(out_squash - out_squash2)) / (len(epsilon_loader)*batch_size)
+
+            return diff_smooth, diff_squash
+
+def create_epsilon_loaders(new_dataset, epsilon):
+    epsilon_datatest = [data.clone() for data in new_dataset[int(len(new_dataset)*0.9):]]
+    epsilon_datatrain = [data.clone() for data in new_dataset[:int(len(new_dataset)*0.9)]]
+    for data in epsilon_datatest:
+        for nodes in data.x:
+            if nodes[0] == -1:
+                nodes[1] += epsilon
+    for data in epsilon_datatrain:
+        for nodes in data.x:
+            if nodes[0] == -1:
+                nodes[1] += epsilon
+    epsilon_trainloader = DataLoader(epsilon_datatrain, batch_size=64, shuffle=False)
+    epsilon_testloader = DataLoader(epsilon_datatest, batch_size=64, shuffle=False)
+
+    return epsilon_trainloader, epsilon_testloader
+
+def plot_graph_TOGNN(wModel, train_dataset, test_dataset, device, EPOCHS):
+    for test in range(10):
+    #take a random graph from dataset
+        data_ = random.choice(train_dataset).clone()
+        data_ = data_.to(device)
+        #run the model on the graph
+        out_smooth, out_squash, _ = wModel(data_.x.to(torch.float32), data_.edge_index, batch= data_.batch, dirichlet=False, ctrl=data_.ctrl,
+                                            edge_weights=data_.weightedEdges.to(torch.float32), edge_attr=data_.edge_attr.to(torch.float32), visualize_weights=True)
+        #plot the graph
+        weights = wModel.newgraph
+        #transfer the weights to an adjacency matrix using constructAdjFromControl
+        adjs = []
+        for i in range(len(weights)):
+            adj = ConstructAdjFromControl(data_.edge_index,weights[i])
+            adjs.append(adj)
+        
+        graphs = []
+        #use nx to construct networkx directed graphs from the adjacency matrices
+        for adj in adjs:
+            G = nx.from_numpy_array(adj, create_using=nx.DiGraph)
+            graphs.append(G)
+        pos = nx.spring_layout(G)
+        colors = []
+        for i in range(len(G.nodes())):
+            #if feature 0 i 0, then node black
+            if data_.x[i][0] == 0:
+                colors.append("black")
+            #if feature 0 is 1, then node red
+            elif data_.x[i][0] == 1:
+                colors.append("red")
+            #if feature 0 is -1, then node blue
+            elif data_.x[i][0] == -1:
+                colors.append("blue")
+            else:
+                colors.append("black")
+        #plot the directed graphs
+        fig, ax = plt.subplots(1, len(graphs), figsize=(24, 8))
+        for i in range(len(graphs)):
+            nx.draw(graphs[i], pos=pos, ax=ax[i], with_labels=True, node_color=colors, edge_color='gray', node_size=300, width=2, arrowsize=15)
+        #save the figure in folder as png
+        #create a timestamp for the figure
+    
+        timestamp = time.time()
+        plt.savefig(f"graphs/testDigraph_{timestamp}_{test}_{EPOCHS}epochs.png")
+
+def reconstruct_graph(random_data, gradients, depth, model, epoch, dist):
+    edge_index = random_data.edge_index
+    node_features = random_data.x
+    adj = edge_index_to_adjacency_matrix(edge_index).numpy()
+    # Construct the graph and write gradients on nodes
+    G = nx.from_numpy_array(adj)
+    pos = nx.spring_layout(G)
+
+    colors = []
+    for i in range(len(G.nodes())):
+        #if feature 0 i 0, then node grey
+        if node_features[i][0] == 0:
+            colors.append("grey")
+        #if feature 0 is 1, then node red
+        elif node_features[i][0] == 1:
+            colors.append("red")
+        #if feature 0 is -1, then node blue
+        elif node_features[i][0] == -1:
+            colors.append("blue")
+        else:
+            colors.append("black")
+
+    #plot the graph
+    plt.figure()
+    nx.draw(G, pos=pos, with_labels=False, node_color=colors, edge_color='gray', node_size=300, width=2)
+    #add the gradients to the nodes
+
+    for i in range(len(G.nodes())):
+        plt.text(pos[i][0], pos[i][1], f'{gradients[i]:.2f}', fontsize=10, color='black')
+
+    #save the figure in folder as png
+    plt.savefig(f"graphs/reconstructedGraph_{model}_{depth}layer_D{dist}_{epoch}epoch.png")

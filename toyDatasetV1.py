@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import LRGBDataset, ZINC
+from torch_geometric.utils import degree
 import matplotlib.pyplot as plt
 from utils import *
 import wandb
@@ -12,12 +13,12 @@ from tqdm import tqdm
 import sys
 import GNN 
 import G2GCN
+import TOGNNdev
 from torchmetrics.regression import R2Score
+import time
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(device)
-
-"""parse the arguments"""
 
 model = str(sys.argv[1]) #torchGIN, torchGCN, customGIN, customGCN, torchGAT, torchSGCN, torchResGated
 weighted = str(sys.argv[2]) #W for weighted, NW for not weighted
@@ -34,25 +35,25 @@ else:
 dist = str(sys.argv[7])
 name = str(sys.argv[8]) #dataset name
 nb_seeds = int(sys.argv[9])
-model_type = str(sys.argv[10]) # GNN, G2GNN, SRDF
+model_type = str(sys.argv[10]) # GNN, G2GNN, SRDF, TOGNN
+exp_number = str(sys.argv[11])
+width = int(sys.argv[12])
 
 """Initialise the dataset"""
 
 if name == "LRGB":
-    dataset = LRGBDataset(name="Peptides-func",root='/home/olivier/GraphCurvatureProject/LRGBdataset')
+    dataset = LRGBDataset(name="Peptides-func",root='/home/students/oliver/MasterProject/LRGBdataset')
 if name == "ZINC":
-    dataset = ZINC(subset=True,root='/home/olivier/GraphCurvatureProject/ZINCdataset')
+    dataset = ZINC(subset=True,root='/home/students/oliver/MasterProject/ZINCdataset')
 if name == "ZINC_SRDF":
-    dataset = ZINC(subset=True,root='/home/olivier/GraphCurvatureProject/ZINCdataset')
+    dataset = ZINC(subset=True,root='/home/students/oliver/MasterProject/ZINCdataset')
 
 data = dataset[0]
-print(data)
-exit()
 
 """Customize the dataset to create the synthetic task"""
 
 #open the dataset from the pickle file
-with open(f"ToyDataset_vec_{dist}_{name}.pkl", "rb") as f:
+with open(f"datasets/ToyDataset_vec_{dist}_{name}.pkl", "rb") as f:
     new_dataset_ = pickle.load(f)
 
 new_features = new_dataset_[0]
@@ -85,22 +86,42 @@ if weighted == "W":
     disconnectedpath = "ZINCdisconnectedFull.pkl"
     new_dataset = apply_weights_on_dataset(weightedpath, disconnectedpath, new_dataset)
 
+#Compute the histogram of the in-degrees for PNAconv model
+if model == "torchPNA":
+    in_degrees = []
+    for data in new_dataset:
+        in_degrees.append(degree(data.edge_index[1], num_nodes=data.num_nodes, dtype=torch.long))
+    
+    # Flatten the in-degrees list
+    in_degrees = torch.cat(in_degrees)
+    
+    # Create the histogram of in-degrees
+    deg_histogram = torch.bincount(in_degrees)
 
-"""Split the dataset into train and test loaders"""
+
+#Split the dataset into train and test loaders
 
 train_dataset = new_dataset[:int(len(new_dataset)*0.9)]
 test_dataset  = new_dataset[int(len(new_dataset)*0.9):]
 
-#create a copy of the test_dataset where each feature has +epsilon
-epsilon_dataset = new_dataset[int(len(new_dataset)*0.9):]
-for data in epsilon_dataset:
-    for nodes in data.x:
-        if nodes[0] == -1:
-            nodes[1] += 0.01
+#Create the dataloaders
 
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+train_loader_unshuffled = DataLoader(train_dataset, batch_size=64, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
-epsilon_loader = DataLoader(epsilon_dataset, batch_size=64, shuffle=False)
+random_loader = DataLoader(new_dataset, batch_size=1, shuffle=True)
+
+#Initialise the epsilon loaders
+
+epsilon_trainloaders = []
+epsilon_testloaders = []
+for i in range(3):
+    train_loader, test_loader = create_epsilon_loaders(new_dataset, 1*10**(-i))
+    epsilon_trainloaders.append(train_loader)
+    epsilon_testloaders.append(test_loader)
+
+
+
 
 #delete dataset to free up memory
 del dataset
@@ -111,17 +132,14 @@ torch.cuda.empty_cache()
 """Initialise hyperparameters"""
 
 LEARNING_RATE = 0.0005
-EPOCHS = 120
+EPOCHS = 200
 layers = np.arange(1, layer+1)
-dim_in = 2
+dim_in = train_dataset[0].num_features
 if test == "both":
     double_mlp = True
 else:
     double_mlp = False
 
-width = 32 #width of the model
-if model == "torchGCN":
-    width = 48
 mlp_depth = 2 #depth of the mlp for GIN
 
 """Set up the seeds for group testing"""
@@ -156,6 +174,11 @@ for seed in seeds:
                         num_classes=num_labels, weighted=weighted, residual=residual, 
                         self_loop=self_loop, double_mlp=double_mlp, mlp_depth=mlp_depth)
         model = 'SRDF'
+    if model_type == "PNAConv":
+        modell = GNN.GNN(dim_in, width, layer, layersType=model, task='regression', 
+                        num_classes=num_labels, weighted=weighted, residual=residual, 
+                        self_loop=self_loop, double_mlp=double_mlp, mlp_depth=mlp_depth, deg=deg_histogram)
+        
     wModel = modell.to(device)
     # Initialise optimizer, and classification criterion  for multi-label classification
     criterion = torch.nn.MSELoss().to(device)
@@ -167,13 +190,13 @@ for seed in seeds:
     """ Initialise WandB """
     wandb.init(
         # set the wandb project where this run will be logged
-        project="SyntheticDataset8",
+        project=f"SyntheticDataset{exp_number}",
         
         # set the name of the run
-        name=f"V8-{model}-{layer}layers-testing-{test}-D{dist}",
+        name=f"V{exp_number}-{model}-{layer}layers-testing-{test}-D{dist}",
 
         # tags
-        tags=[test],
+        # tags=[test],
         
         # track hyperparameters and run metadata
         config={
@@ -187,6 +210,7 @@ for seed in seeds:
             "testing":test,
             "dist": dist,
             "self_loop": self_loop,
+            "width": width
         }
     )
     print(f"Training {model} with {layer} layers on ToyDataset...")
@@ -221,7 +245,8 @@ for seed in seeds:
 
             optimizer.zero_grad()
 
-            out_smooth, out_squash, diric = wModel(data.x.to(torch.float32), data.edge_index, batch=data.batch, dropout=dropout, ctrl=data.ctrl, edge_weights=data.weightedEdges.to(torch.float32))
+            out_smooth, out_squash, diric = wModel(data.x.to(torch.float32), data.edge_index, batch=data.batch,
+                                                     dropout=dropout, ctrl=data.ctrl)
             out_smooth, out_squash = out_smooth.view(-1), out_squash.view(-1)
             
 
@@ -284,7 +309,8 @@ for seed in seeds:
 
         for data in test_loader:
             data = data.to(device)
-            out_smooth, out_squash, diric = wModel(data.x.to(torch.float32), data.edge_index, batch= data.batch, dirichlet=track_dirichlet, ctrl=data.ctrl, dropout=False, edge_weights=data.weightedEdges.to(torch.float32))
+            out_smooth, out_squash, diric = wModel(data.x.to(torch.float32), data.edge_index, batch= data.batch, 
+                                            dirichlet=track_dirichlet, ctrl=data.ctrl, dropout=False)
             out_smooth, out_squash = out_smooth.view(-1), out_squash.view(-1)
 
             
@@ -314,26 +340,37 @@ for seed in seeds:
 
 
         #compute the difference between the outputs of the model on the test set and the epsilon set
-        diff_smooth = 0
-        diff_squash = 0
-        #run the model on the epsilon dataset and test set simultaneously
-        for data, data2 in zip(test_loader, epsilon_loader):
-            data = data.to(device)
-            data2 = data2.to(device)
-            out_smooth, out_squash, _ = wModel(data.x.to(torch.float32), data.edge_index, batch= data.batch, dirichlet=False, ctrl=data.ctrl,edge_weights=data.weightedEdges.to(torch.float32))
-            out_smooth, out_squash = out_smooth.view(-1), out_squash.view(-1)
-            out_smooth2, out_squash2, _ = wModel(data2.x.to(torch.float32), data2.edge_index, batch= data2.batch, dirichlet=False, ctrl=data2.ctrl,edge_weights=data.weightedEdges.to(torch.float32))
-            out_smooth2, out_squash2 = out_smooth2.view(-1), out_squash2.view(-1)
+        for i in range(3):
+            epsilon = 1 * 10**(-i)
+            diff_smoothtrain, diff_squashtrain = compute_diff(wModel, original_loader= train_loader_unshuffled,
+                                                             epsilon_loader=epsilon_trainloaders[i], device=device, batch_size=64)
+            diff_smoothtest, diff_squashtest = compute_diff(wModel, original_loader= test_loader, 
+                                                            epsilon_loader=epsilon_testloaders[i], device=device, batch_size=64)
 
+            #log the differences
+            wandb.log({f"diff_smoothtrain_{epsilon}": diff_smoothtrain/epsilon, f"diff_squashtrain_{epsilon}": diff_squashtrain/epsilon,
+                        f"diff_smoothtest_{epsilon}": diff_smoothtest/epsilon, f"diff_squashtest_{epsilon}": diff_squashtest/epsilon})
 
-            #compute the difference between the outputs
-            diff_smooth += torch.sum(torch.abs(out_smooth - out_smooth2))/len(test_loader)
-            diff_squash += torch.sum(torch.abs(out_squash - out_squash2))/len(test_loader)
-
-        #log the differences
-        wandb.log({"diff_smooth": diff_smooth, "diff_squash": diff_squash})
-
-
+        if epoch % 20 == 0:
+            #use autograd to compute the gradients of the model for a random graph from the test set
+            for data in random_loader:
+                data = data.to(device)
+                data.x.requires_grad = True
+                optimizer.zero_grad()
+                out_smooth, out_squash, diric = wModel(data.x.to(torch.float32), data.edge_index, batch= data.batch, 
+                                            dirichlet=track_dirichlet, ctrl=data.ctrl, dropout=False)
+                out_smooth, out_squash = out_smooth.view(-1), out_squash.view(-1)
+                loss_smooth = criterion(out_smooth, data.y2)
+                loss_squash = criterion(out_squash, data.y)
+                loss = loss_smooth + loss_squash
+                loss.backward()
+                gradients =  data.x.grad
+                #compute the mean gradient for each node
+                gradients = torch.mean(gradients, dim=1)
+                #use the gradients to reconstruct the graph with the grad written on the nodes
+                reconstruct_graph(data, gradients, depth=layer, model=model, epoch=epoch, dist=dist) 
+                break
+            
 
 
         if test=="both":
@@ -351,7 +388,6 @@ for seed in seeds:
        
         #log the curve of the dirichlet energy through the layers
         if track_dirichlet:
-            print("dirichlet = ", dirichlet[-1])
             fig = plt.figure()
             plt.plot(layers, dirichlet[-1])
             plt.xlabel("Layer")
@@ -359,10 +395,12 @@ for seed in seeds:
             wandb.log({"dirichlet": wandb.Image(fig)})
             plt.close(fig)
     print(f"Epoch {epoch} | Train LOSS: {train_full_loss} | Test LOSS: {test_full_loss}")
-    #log an histogram of the targets
-    # wandb.log({"train_target_histogram": wandb.Histogram(np.array(new_targets))})
 
     wandb.finish()
+
+    if model_type == "TOGNN":
+        plot_graph_TOGNN(wModel, name, model, layer, seed, dist, test)
+
 
     print("Training finished!")
 

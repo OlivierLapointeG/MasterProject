@@ -13,7 +13,7 @@ import pickle
 
 #download LRGB dataset and create a dataset object containing only peptides func
 # dataset = LRGBDataset(name="Peptides-func", root='/home/olivier/GraphCurvatureProject/LRGBdataset')
-dataset = ZINC(subset=True,root='/home/olivier/GraphCurvatureProject/ZINCdataset')
+dataset = ZINC(subset=True,root='/home/students/oliver/MasterProject/ZINCdataset')
 
 
 
