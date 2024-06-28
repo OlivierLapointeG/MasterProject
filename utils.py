@@ -726,3 +726,53 @@ def reconstruct_graph(random_data, gradients, depth, model, epoch, dist):
 
     #save the figure in folder as png
     plt.savefig(f"graphs/reconstructedGraph_{model}_{depth}layer_D{dist}_{epoch}epoch.png")
+
+def compute_gradient_mean(model, criterion, data_loader, optimizer, device, track_dirichlet=False):
+    model.to(device)
+    model.eval()
+    
+    gradients = []
+    counter = 0
+    for data in data_loader:
+        counter += 1
+        data = data.to(device)
+        data.x.requires_grad = True
+        optimizer.zero_grad()
+        
+        out_smooth, out_squash, diric = model(
+            data.x.to(torch.float32), 
+            data.edge_index, 
+            batch=data.batch, 
+            dirichlet=track_dirichlet, 
+            ctrl=data.ctrl, 
+            dropout=False
+        )
+        
+        out_smooth, out_squash = out_smooth.view(-1), out_squash.view(-1)
+        loss_smooth = criterion(out_smooth, data.y2)
+        loss_squash = criterion(out_squash, data.y)
+        loss = loss_smooth + loss_squash
+        loss.backward()
+        
+        # Find the indices of the nodes with the first feature equal to -1
+        target_node_indices = (data.x[:, 0] == -1).nonzero(as_tuple=True)[0]
+        
+        # Compute the gradients of the loss with respect to the second feature of the target nodes
+        if target_node_indices.numel() > 0:  # Check if there is at least one node meeting the condition
+            grads = data.x.grad[target_node_indices, 1]
+            #take the absolute value of the gradients
+            grads = torch.abs(grads)
+            gradients.extend(grads.tolist())
+        
+        # Reset gradients for the next iteration
+        data.x.grad.zero_()
+
+        if counter > 100:
+            break
+
+    if gradients:
+        mean_gradient = sum(gradients) / len(gradients)
+    else:
+        mean_gradient = None  # or 0, depending on how you want to handle cases with no gradients
+    print(mean_gradient)
+    return mean_gradient

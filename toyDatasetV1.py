@@ -67,7 +67,7 @@ if name == 'ZINC_SRDF':
 
 new_dataset = []
 correction = 0
-for i, data in tqdm(enumerate(dataset)):
+for i, data in enumerate(dataset):
     if i in skip_list:
         correction +=1
         continue
@@ -119,6 +119,8 @@ for i in range(3):
     train_loader, test_loader = create_epsilon_loaders(new_dataset, 1*10**(-i))
     epsilon_trainloaders.append(train_loader)
     epsilon_testloaders.append(test_loader)
+
+
 
 
 
@@ -213,11 +215,11 @@ for seed in seeds:
             "width": width
         }
     )
-    print(f"Training {model} with {layer} layers on ToyDataset...")
+    print(f"Training {model} with {layer} layers on ToyDataset...?")
 
 
     """Train the model"""
-    for epoch in tqdm(range(EPOCHS)):
+    for epoch in range(EPOCHS):
         # Reset Metrics
         train_squash_loss = 0
         test_squash_loss = 0
@@ -351,26 +353,8 @@ for seed in seeds:
             wandb.log({f"diff_smoothtrain_{epsilon}": diff_smoothtrain/epsilon, f"diff_squashtrain_{epsilon}": diff_squashtrain/epsilon,
                         f"diff_smoothtest_{epsilon}": diff_smoothtest/epsilon, f"diff_squashtest_{epsilon}": diff_squashtest/epsilon})
 
-        if epoch % 20 == 0:
-            #use autograd to compute the gradients of the model for a random graph from the test set
-            for data in random_loader:
-                data = data.to(device)
-                data.x.requires_grad = True
-                optimizer.zero_grad()
-                out_smooth, out_squash, diric = wModel(data.x.to(torch.float32), data.edge_index, batch= data.batch, 
-                                            dirichlet=track_dirichlet, ctrl=data.ctrl, dropout=False)
-                out_smooth, out_squash = out_smooth.view(-1), out_squash.view(-1)
-                loss_smooth = criterion(out_smooth, data.y2)
-                loss_squash = criterion(out_squash, data.y)
-                loss = loss_smooth + loss_squash
-                loss.backward()
-                gradients =  data.x.grad
-                #compute the mean gradient for each node
-                gradients = torch.mean(gradients, dim=1)
-                #use the gradients to reconstruct the graph with the grad written on the nodes
-                reconstruct_graph(data, gradients, depth=layer, model=model, epoch=epoch, dist=dist) 
-                break
-            
+        
+        mean_gradient = compute_gradient_mean(wModel, criterion, random_loader, optimizer, device)
 
 
         if test=="both":
@@ -378,7 +362,8 @@ for seed in seeds:
                         "test_R2_smooth": test_R2score_smooth.compute(),
                         "test_R2_squash": test_R2score_squash.compute(),
                         "test_smooth_loss": test_smooth_loss,
-                        "test_squash_loss": test_squash_loss, "test_dirichlet": test_diric})
+                        "test_squash_loss": test_squash_loss, "test_dirichlet": test_diric,
+                        "mean_gradient": mean_gradient})
         elif test == "smooth":
             wandb.log({"test_smooth_loss": test_full_loss, "test_R2_smooth": test_R2score_smooth.compute()})
         elif test == "squash":
