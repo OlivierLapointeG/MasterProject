@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch_geometric.data import Data, Dataset, batch
 from torch_geometric.loader import DataLoader
-from torch_geometric.datasets import LRGBDataset, QM9, ZINC
+from torch_geometric.datasets import LRGBDataset, QM9, ZINC, MNISTSuperpixels
 import matplotlib.pyplot as plt
 import networkx as nx
 from utils import *
@@ -45,6 +45,8 @@ elif name =='ZINC_SRDF':
     dataset = ZINC(subset=True,root='/home/students/oliver/MasterProjectZINCdataset')
 elif name == "ZINC_mul":
     dataset = ZINC(subset=True,root='/home/students/oliver/MasterProject/ZINCdataset')
+elif name == 'PIXEL':
+    dataset = MNISTSuperpixels(root='/home/students/oliver/MasterProject/PIXELdataset')
 
 
 

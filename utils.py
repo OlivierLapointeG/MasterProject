@@ -731,10 +731,9 @@ def compute_gradient_mean(model, criterion, data_loader, optimizer, device, trac
     model.to(device)
     model.eval()
     
-    gradients = []
-    counter = 0
+    relative_gradients = []
+    
     for data in data_loader:
-        counter += 1
         data = data.to(device)
         data.x.requires_grad = True
         optimizer.zero_grad()
@@ -757,22 +756,31 @@ def compute_gradient_mean(model, criterion, data_loader, optimizer, device, trac
         # Find the indices of the nodes with the first feature equal to -1
         target_node_indices = (data.x[:, 0] == -1).nonzero(as_tuple=True)[0]
         
+        # Find the indices of all other nodes
+        other_node_indices = (data.x[:, 0] != -1).nonzero(as_tuple=True)[0]
+        
         # Compute the gradients of the loss with respect to the second feature of the target nodes
-        if target_node_indices.numel() > 0:  # Check if there is at least one node meeting the condition
-            grads = data.x.grad[target_node_indices, 1]
-            #take the absolute value of the gradients
-            grads = torch.abs(grads)
-            gradients.extend(grads.tolist())
+        if target_node_indices.numel() > 0 and other_node_indices.numel() > 0:  # Check if there are nodes meeting both conditions
+            target_grads = data.x.grad[target_node_indices, 1]
+            other_grads = data.x.grad[other_node_indices, 1]
+            
+            # Calculate the mean gradient for the interesting nodes and other nodes
+            mean_target_grad = target_grads.abs().mean().item()
+            mean_other_grad = other_grads.abs().mean().item()
+            
+            # Compute the relative gradient
+            relative_grad = mean_target_grad / (mean_other_grad+mean_target_grad) if mean_other_grad != 0 else float('inf')
+            relative_gradients.append(relative_grad)
+        else:
+            relative_gradients.append(None)
         
         # Reset gradients for the next iteration
         data.x.grad.zero_()
 
-        if counter > 100:
-            break
-
-    if gradients:
-        mean_gradient = sum(gradients) / len(gradients)
+    # Compute the mean of relative gradients across all batches
+    if relative_gradients:
+        mean_relative_gradient = sum(relative_gradients) / len(relative_gradients)
     else:
-        mean_gradient = None  # or 0, depending on how you want to handle cases with no gradients
-    print(mean_gradient)
-    return mean_gradient
+        mean_relative_gradient = None  # or 0, depending on how you want to handle cases with no relative gradients
+    
+    return mean_relative_gradient

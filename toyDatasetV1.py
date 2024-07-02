@@ -109,7 +109,7 @@ test_dataset  = new_dataset[int(len(new_dataset)*0.9):]
 train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 train_loader_unshuffled = DataLoader(train_dataset, batch_size=64, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
-random_loader = DataLoader(new_dataset, batch_size=1, shuffle=True)
+random_loader = DataLoader(new_dataset, batch_size=508, shuffle=True)
 
 #Initialise the epsilon loaders
 
@@ -353,9 +353,10 @@ for seed in seeds:
             wandb.log({f"diff_smoothtrain_{epsilon}": diff_smoothtrain/epsilon, f"diff_squashtrain_{epsilon}": diff_squashtrain/epsilon,
                         f"diff_smoothtest_{epsilon}": diff_smoothtest/epsilon, f"diff_squashtest_{epsilon}": diff_squashtest/epsilon})
 
-        
+        time_start = time.time()
         mean_gradient = compute_gradient_mean(wModel, criterion, random_loader, optimizer, device)
-
+        time_end = time.time()
+        print(f"Time to compute the gradient: {time_end-time_start}")
 
         if test=="both":
             wandb.log({"test_loss": test_full_loss,
